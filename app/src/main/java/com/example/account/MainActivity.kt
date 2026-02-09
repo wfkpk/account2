@@ -3,6 +3,7 @@ package com.example.account
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,11 +29,12 @@ import com.example.account.ui.theme.AccountTheme
 import com.example.account.viewmodel.AccountViewModel
 
 class MainActivity : ComponentActivity() {
-    
+
     private val viewModel: AccountViewModel by viewModels()
-    
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setContent {
             AccountTheme {
                 AppNavigation(viewModel = viewModel)
@@ -46,21 +48,19 @@ fun AppNavigation(viewModel: AccountViewModel) {
     val navController = rememberNavController()
     val accounts by viewModel.accounts.collectAsState()
     val isInitialized by viewModel.isInitialized.collectAsState()
-    
-    // Show loading screen while fetching accounts from SSO service
+
     if (!isInitialized) {
         LoadingScreen()
         return
     }
-    
-    // Determine start destination based on whether user has accounts from SSO service
+
     val startDestination = if (accounts.isNotEmpty()) "accounts" else "login"
-    
+
     NavHost(navController = navController, startDestination = startDestination) {
         composable("login") {
             LoginScreen(
                 viewModel = viewModel,
-                onLoginSuccess = { 
+                onLoginSuccess = {
                     navController.navigate("accounts") {
                         popUpTo("login") { inclusive = true }
                     }
@@ -68,7 +68,6 @@ fun AppNavigation(viewModel: AccountViewModel) {
             )
         }
         composable("accounts") {
-            // Watch for accounts becoming empty (after logout) and navigate to login
             LaunchedEffect(accounts) {
                 if (accounts.isEmpty()) {
                     navController.navigate("login") {
@@ -76,17 +75,12 @@ fun AppNavigation(viewModel: AccountViewModel) {
                     }
                 }
             }
-            
+
             AccountScreen(
                 viewModel = viewModel,
-                onLogout = {
-                    // Navigation happens via LaunchedEffect when accounts become empty
-                },
-                onLogoutAll = {
-                    // Navigation to login happens via LaunchedEffect when accounts become empty
-                },
+                onLogout = {},
+                onLogoutAll = {},
                 onAddAccount = {
-                    // Reset login state and navigate to login screen to add another account
                     viewModel.resetLoginState()
                     navController.navigate("login")
                 }

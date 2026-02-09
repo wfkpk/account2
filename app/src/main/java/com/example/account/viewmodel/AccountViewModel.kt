@@ -11,54 +11,44 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
-/**
- * ViewModel for managing account-related operations using the SsoApiClient.
- * All account operations are performed via AIDL to the SSO service.
- * 
- * The SSO service connection is ON-DEMAND - it connects only when making a call.
- * No local storage is used - all data comes from the SSO service.
- */
 class AccountViewModel(application: Application) : AndroidViewModel(application) {
-    
+
     companion object {
         private const val TAG = "AccountViewModel"
     }
-    
+
     private val ssoApiClient = SsoApiClient(application)
-    
+
     private val _loginState = MutableStateFlow<LoginState>(LoginState.Idle)
     val loginState: StateFlow<LoginState> = _loginState.asStateFlow()
-    
+
     private val _accounts = MutableStateFlow<List<Account>>(emptyList())
     val accounts: StateFlow<List<Account>> = _accounts.asStateFlow()
-    
+
     private val _activeAccount = MutableStateFlow<Account?>(null)
     val activeAccount: StateFlow<Account?> = _activeAccount.asStateFlow()
-    
+
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
-    
-    // Tracks if we've finished initial loading (fetching accounts from service)
+
     private val _isInitialized = MutableStateFlow(false)
     val isInitialized: StateFlow<Boolean> = _isInitialized.asStateFlow()
-    
+
     init {
-        // Fetch accounts from SSO service on startup (on-demand connection)
         fetchAccountsOnStartup()
     }
-    
+
     private fun fetchAccountsOnStartup() {
         viewModelScope.launch {
             Log.d(TAG, "Fetching accounts from SSO service on startup...")
             try {
-                // This will connect on-demand, get accounts, then we can check
                 val accountsList = ssoApiClient.getAllAccounts()
                 _accounts.value = accountsList
-                
+
                 val active = ssoApiClient.getActiveAccount()
                 _activeAccount.value = active
-                
-                Log.d(TAG, "Startup fetch complete: ${accountsList.size} accounts, active: ${active?.name}")
+
+                Log.d(TAG, "Startup fetch complete: ${accountsList.size} accounts, active: ${active?.mail}")
             } catch (e: Exception) {
                 Log.e(TAG, "Error fetching accounts on startup", e)
             } finally {
@@ -66,53 +56,73 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
             }
         }
     }
-    
-    /**
-     * Perform login with username and password via AIDL service.
-     * Connection is made on-demand.
-     * Note: username is used as both email and name fields.
-     */
-    fun login(username: String, password: String) {
+
+    fun login(mail: String, password: String) {
         viewModelScope.launch {
             _loginState.value = LoginState.Loading
-            
-            // Use username as both email and name
-            val account = Account(
-                email = username,
-                name = username,
-                isActive = true
-            )
-            
-            val result = ssoApiClient.login(account)
+            _errorMessage.value = null
+
+            val result = ssoApiClient.login(mail, password)
             result.fold(
-                onSuccess = {
+                onSuccess = { account ->
+                    Log.d(TAG, "Login successful for: ${account.mail}")
+                    // Use the returned account directly to update state,
+                    // since the service may not have persisted it yet when we query
+                    val activeAccount = account.copy(isActive = true)
+                    _activeAccount.value = activeAccount
+                    val currentAccounts = _accounts.value.toMutableList()
+                    currentAccounts.removeAll { it.guid == account.guid }
+                    currentAccounts.add(activeAccount)
+                    _accounts.value = currentAccounts
                     _loginState.value = LoginState.Success
-                    refreshAccounts()
                 },
                 onFailure = { error ->
+                    Log.e(TAG, "Login failed: ${error.message}")
                     _loginState.value = LoginState.Error(error.message ?: "Login failed")
                     _errorMessage.value = error.message
                 }
             )
         }
     }
-    
-    /**
-     * Perform logout for a specific account via AIDL service.
-     * Connection is made on-demand.
-     * @param accountIdentifier The ID or username of the account to logout
-     */
-    fun logout(accountIdentifier: String) {
-        Log.d(TAG, "Logout called with identifier='$accountIdentifier'")
+
+    fun register(mail: String, password: String) {
         viewModelScope.launch {
             _loginState.value = LoginState.Loading
-            
-            val result = ssoApiClient.logout(accountIdentifier)
+            _errorMessage.value = null
+
+            val result = ssoApiClient.register(mail, password)
+            result.fold(
+                onSuccess = { account ->
+                    Log.d(TAG, "Registration successful for: ${account.mail}")
+                    val activeAccount = account.copy(isActive = true)
+                    _activeAccount.value = activeAccount
+                    val currentAccounts = _accounts.value.toMutableList()
+                    currentAccounts.removeAll { it.guid == account.guid }
+                    currentAccounts.add(activeAccount)
+                    _accounts.value = currentAccounts
+                    _loginState.value = LoginState.Success
+                },
+                onFailure = { error ->
+                    Log.e(TAG, "Registration failed: ${error.message}")
+                    _loginState.value = LoginState.Error(error.message ?: "Registration failed")
+                    _errorMessage.value = error.message
+                }
+            )
+        }
+    }
+
+    fun logout(guid: String) {
+        Log.d(TAG, "Logout called with guid='$guid'")
+        viewModelScope.launch {
+            _loginState.value = LoginState.Loading
+            _errorMessage.value = null
+
+            val result = ssoApiClient.logout(guid)
             result.fold(
                 onSuccess = {
-                    Log.d(TAG, "Logged out account: $accountIdentifier")
-                    _loginState.value = LoginState.Idle
+                    Log.d(TAG, "Logged out account: $guid")
                     refreshAccounts()
+                    _loginState.value = LoginState.Idle
                 },
                 onFailure = { error ->
                     Log.e(TAG, "Logout failed: ${error.message}")
@@ -122,15 +132,12 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
             )
         }
     }
-    
-    /**
-     * Logout all accounts via AIDL service.
-     * Connection is made on-demand.
-     */
+
     fun logoutAll() {
         viewModelScope.launch {
             _loginState.value = LoginState.Loading
-            
+            _errorMessage.value = null
+
             val result = ssoApiClient.logoutAll()
             result.fold(
                 onSuccess = {
@@ -146,20 +153,18 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
             )
         }
     }
-    
-    /**
-     * Switch to a different account via AIDL service.
-     * Connection is made on-demand.
-     */
-    fun switchAccount(account: Account) {
+
+    fun switchAccount(guid: String) {
         viewModelScope.launch {
             _loginState.value = LoginState.Loading
-            
-            val result = ssoApiClient.switchAccount(account)
+            _errorMessage.value = null
+
+            val result = ssoApiClient.switchAccount(guid)
             result.fold(
                 onSuccess = {
-                    _loginState.value = LoginState.Success
+                    Log.d(TAG, "Switched to account: $guid")
                     refreshAccounts()
+                    _loginState.value = LoginState.Idle
                 },
                 onFailure = { error ->
                     _loginState.value = LoginState.Error(error.message ?: "Switch account failed")
@@ -168,41 +173,32 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
             )
         }
     }
-    
-    /**
-     * Refresh the list of accounts from the AIDL service.
-     * Connection is made on-demand.
-     */
-    suspend fun refreshAccounts() {
+
+    private suspend fun refreshAccounts() {
         Log.d(TAG, "Refreshing accounts from AIDL service")
         _accounts.value = ssoApiClient.getAllAccounts()
         _activeAccount.value = ssoApiClient.getActiveAccount()
-        Log.d(TAG, "Accounts refreshed: ${_accounts.value.size} accounts, active: ${_activeAccount.value?.name}")
+        Log.d(TAG, "Accounts refreshed: ${_accounts.value.size} accounts, active: ${_activeAccount.value?.mail}")
     }
-    
-    /**
-     * Clear error message.
-     */
+
     fun clearError() {
         _errorMessage.value = null
+        if (_loginState.value is LoginState.Error) {
+            _loginState.value = LoginState.Idle
+        }
     }
-    
-    /**
-     * Reset login state to idle.
-     */
+
     fun resetLoginState() {
         _loginState.value = LoginState.Idle
+        _errorMessage.value = null
     }
-    
+
     override fun onCleared() {
         super.onCleared()
         ssoApiClient.unbind()
     }
 }
 
-/**
- * Represents the state of the login operation.
- */
 sealed class LoginState {
     data object Idle : LoginState()
     data object Loading : LoginState()

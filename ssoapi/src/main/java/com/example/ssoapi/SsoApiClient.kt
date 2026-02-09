@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
+import android.os.Handler
+import android.os.Looper
 import android.os.RemoteException
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
@@ -12,11 +14,20 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+
+/**
+ * Result type for callback-based operations
+ */
+sealed class AuthCallbackResult {
+    data class Success(val account: Account) : AuthCallbackResult()
+    data class Failure(val message: String) : AuthCallbackResult()
+}
 
 /**
  * SsoApiClient is the main entry point for interacting with the SSO Service.
  * It handles binding to the external middleware service (com.example.service)
- * and provides methods for login, logout, and account switching.
+ * and provides methods for login, logout, register, and account management.
  * 
  * This client uses ON-DEMAND connection - it connects when a call is made,
  * not maintaining a persistent connection.
@@ -29,11 +40,13 @@ class SsoApiClient(private val context: Context) {
         private const val SSO_SERVICE_CLASS = "com.example.service.SsoService"
         private const val SSO_SERVICE_ACTION = "com.example.service.SSO_SERVICE"
         private const val CONNECTION_TIMEOUT_MS = 5000L
+        private const val CALLBACK_TIMEOUT_MS = 30000L
     }
     
     private var ssoService: sso? = null
     private var isBound = false
     private var pendingConnection: ((Boolean) -> Unit)? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
     
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -133,16 +146,50 @@ class SsoApiClient(private val context: Context) {
      * Check if the client is currently bound to the service.
      */
     fun isConnected(): Boolean = isBound && ssoService != null
+
+    /**
+     * Creates an IAuthCallback that resumes the given continuation
+     */
+    private fun createCallback(
+        onSuccess: (Account) -> Unit,
+        onFailure: (String) -> Unit
+    ): IAuthCallback {
+        return object : IAuthCallback.Stub() {
+            private var resultReceived = false
+            private var wasSuccess = false
+            
+            override fun onResult(result: AuthResult) {
+                Log.d(TAG, "onResult: success=${result.success}, fail=${result.fail}, message=${result.message}")
+                resultReceived = true
+                wasSuccess = result.success
+                
+                if (result.fail) {
+                    mainHandler.post {
+                        onFailure(result.message ?: "Unknown error")
+                    }
+                }
+                // If success, we wait for onAccountReceived
+            }
+            
+            override fun onAccountReceived(account: Account) {
+                Log.d(TAG, "onAccountReceived: guid=${account.guid}, mail=${account.mail}")
+                if (wasSuccess) {
+                    mainHandler.post {
+                        onSuccess(account)
+                    }
+                }
+            }
+        }
+    }
     
     /**
-     * Login with the given account credentials.
-     * This calls the external service which will make the server call.
-     * Connects on-demand if not already connected.
-     * @param account The account to login with
-     * @return Result indicating success or failure
+     * Login with email and password via AIDL service.
+     * Authenticates via /get-token + /account-info, saves to DB & AccountManager, sets active.
+     * @param mail The email address
+     * @param password The password
+     * @return Result containing the Account on success, or error on failure
      */
-    suspend fun login(account: Account): Result<Unit> {
-        // Connect on-demand
+    suspend fun login(mail: String, password: String): Result<Account> {
         if (!ensureConnected()) {
             return Result.failure(IllegalStateException("Could not connect to SSO Service. Please ensure the service is installed."))
         }
@@ -154,12 +201,30 @@ class SsoApiClient(private val context: Context) {
             }
             
             try {
-                service.login(account)
-                Log.d(TAG, "Login call completed for account: ${account.name}")
-                Result.success(Unit)
-            } catch (e: RemoteException) {
-                Log.e(TAG, "Login failed with RemoteException", e)
-                Result.failure(e)
+                withTimeoutOrNull(CALLBACK_TIMEOUT_MS) {
+                    suspendCancellableCoroutine { continuation ->
+                        val callback = createCallback(
+                            onSuccess = { account ->
+                                if (continuation.isActive) {
+                                    continuation.resume(Result.success(account))
+                                }
+                            },
+                            onFailure = { message ->
+                                if (continuation.isActive) {
+                                    continuation.resume(Result.failure(Exception(message)))
+                                }
+                            }
+                        )
+                        
+                        try {
+                            service.login(mail, password, callback)
+                        } catch (e: RemoteException) {
+                            if (continuation.isActive) {
+                                continuation.resume(Result.failure(e))
+                            }
+                        }
+                    }
+                } ?: Result.failure(Exception("Login timeout"))
             } catch (e: Exception) {
                 Log.e(TAG, "Login failed", e)
                 Result.failure(e)
@@ -168,15 +233,13 @@ class SsoApiClient(private val context: Context) {
     }
     
     /**
-     * Logout a specific account by ID or username.
-     * Connects on-demand if not already connected.
-     * @param accountIdentifier The ID or username of the account to logout
-     * @return Result indicating success or failure
+     * Register with email and password via AIDL service.
+     * Registers via /sign-in, saves to DB & AccountManager, sets active.
+     * @param mail The email address
+     * @param password The password
+     * @return Result containing the Account on success, or error on failure
      */
-    suspend fun logout(accountIdentifier: String): Result<Unit> {
-        Log.d(TAG, "Logout called with identifier='$accountIdentifier'")
-        
-        // Connect on-demand
+    suspend fun register(mail: String, password: String): Result<Account> {
         if (!ensureConnected()) {
             return Result.failure(IllegalStateException("Could not connect to SSO Service."))
         }
@@ -188,9 +251,160 @@ class SsoApiClient(private val context: Context) {
             }
             
             try {
-                Log.d(TAG, "Calling service.logout('$accountIdentifier')")
-                service.logout(accountIdentifier)
-                Log.d(TAG, "Logout call completed for: $accountIdentifier")
+                withTimeoutOrNull(CALLBACK_TIMEOUT_MS) {
+                    suspendCancellableCoroutine { continuation ->
+                        val callback = createCallback(
+                            onSuccess = { account ->
+                                if (continuation.isActive) {
+                                    continuation.resume(Result.success(account))
+                                }
+                            },
+                            onFailure = { message ->
+                                if (continuation.isActive) {
+                                    continuation.resume(Result.failure(Exception(message)))
+                                }
+                            }
+                        )
+                        
+                        try {
+                            service.register(mail, password, callback)
+                        } catch (e: RemoteException) {
+                            if (continuation.isActive) {
+                                continuation.resume(Result.failure(e))
+                            }
+                        }
+                    }
+                } ?: Result.failure(Exception("Register timeout"))
+            } catch (e: Exception) {
+                Log.e(TAG, "Register failed", e)
+                Result.failure(e)
+            }
+        }
+    }
+    
+    /**
+     * Fetch token only (does NOT save anything).
+     * Just calls /get-token, returns guid + sessionToken.
+     * @param mail The email address
+     * @param password The password
+     * @return Result containing the Account (with guid/sessionToken) on success
+     */
+    suspend fun fetchToken(mail: String, password: String): Result<Account> {
+        if (!ensureConnected()) {
+            return Result.failure(IllegalStateException("Could not connect to SSO Service."))
+        }
+        
+        return withContext(Dispatchers.IO) {
+            val service = ssoService
+            if (service == null) {
+                return@withContext Result.failure(IllegalStateException("Service not connected."))
+            }
+            
+            try {
+                withTimeoutOrNull(CALLBACK_TIMEOUT_MS) {
+                    suspendCancellableCoroutine { continuation ->
+                        val callback = createCallback(
+                            onSuccess = { account ->
+                                if (continuation.isActive) {
+                                    continuation.resume(Result.success(account))
+                                }
+                            },
+                            onFailure = { message ->
+                                if (continuation.isActive) {
+                                    continuation.resume(Result.failure(Exception(message)))
+                                }
+                            }
+                        )
+                        
+                        try {
+                            service.fetchToken(mail, password, callback)
+                        } catch (e: RemoteException) {
+                            if (continuation.isActive) {
+                                continuation.resume(Result.failure(e))
+                            }
+                        }
+                    }
+                } ?: Result.failure(Exception("FetchToken timeout"))
+            } catch (e: Exception) {
+                Log.e(TAG, "FetchToken failed", e)
+                Result.failure(e)
+            }
+        }
+    }
+    
+    /**
+     * Fetch account info only (does NOT save anything).
+     * Just calls /account-info, returns full account data.
+     * @param guid The account GUID
+     * @param sessionToken The session token
+     * @return Result containing the full Account on success
+     */
+    suspend fun fetchAccountInfo(guid: String, sessionToken: String): Result<Account> {
+        if (!ensureConnected()) {
+            return Result.failure(IllegalStateException("Could not connect to SSO Service."))
+        }
+        
+        return withContext(Dispatchers.IO) {
+            val service = ssoService
+            if (service == null) {
+                return@withContext Result.failure(IllegalStateException("Service not connected."))
+            }
+            
+            try {
+                withTimeoutOrNull(CALLBACK_TIMEOUT_MS) {
+                    suspendCancellableCoroutine { continuation ->
+                        val callback = createCallback(
+                            onSuccess = { account ->
+                                if (continuation.isActive) {
+                                    continuation.resume(Result.success(account))
+                                }
+                            },
+                            onFailure = { message ->
+                                if (continuation.isActive) {
+                                    continuation.resume(Result.failure(Exception(message)))
+                                }
+                            }
+                        )
+                        
+                        try {
+                            service.fetchAccountInfo(guid, sessionToken, callback)
+                        } catch (e: RemoteException) {
+                            if (continuation.isActive) {
+                                continuation.resume(Result.failure(e))
+                            }
+                        }
+                    }
+                } ?: Result.failure(Exception("FetchAccountInfo timeout"))
+            } catch (e: Exception) {
+                Log.e(TAG, "FetchAccountInfo failed", e)
+                Result.failure(e)
+            }
+        }
+    }
+    
+    /**
+     * Logout a specific account by GUID.
+     * Signs out from server, removes from DB & AccountManager.
+     * @param guid The GUID of the account to logout
+     * @return Result indicating success or failure
+     */
+    suspend fun logout(guid: String): Result<Unit> {
+        Log.d(TAG, "Logout called with guid='$guid'")
+        
+        if (!ensureConnected()) {
+            return Result.failure(IllegalStateException("Could not connect to SSO Service."))
+        }
+        
+        return withContext(Dispatchers.IO) {
+            val service = ssoService
+            if (service == null) {
+                return@withContext Result.failure(IllegalStateException("Service not connected."))
+            }
+            
+            try {
+                Log.d(TAG, "Calling service.logout('$guid')")
+                service.logout(guid)
+                Log.d(TAG, "Logout call completed for: $guid")
                 Result.success(Unit)
             } catch (e: RemoteException) {
                 Log.e(TAG, "Logout failed with RemoteException", e)
@@ -204,11 +418,10 @@ class SsoApiClient(private val context: Context) {
     
     /**
      * Logout all accounts.
-     * Connects on-demand if not already connected.
+     * Signs out all accounts from server, clears everything.
      * @return Result indicating success or failure
      */
     suspend fun logoutAll(): Result<Unit> {
-        // Connect on-demand
         if (!ensureConnected()) {
             return Result.failure(IllegalStateException("Could not connect to SSO Service."))
         }
@@ -234,13 +447,12 @@ class SsoApiClient(private val context: Context) {
     }
     
     /**
-     * Switch to a different account.
-     * Connects on-demand if not already connected.
-     * @param account The account to switch to
+     * Switch to a different account by GUID.
+     * Sets a different stored account as active.
+     * @param guid The GUID of the account to switch to
      * @return Result indicating success or failure
      */
-    suspend fun switchAccount(account: Account): Result<Unit> {
-        // Connect on-demand
+    suspend fun switchAccount(guid: String): Result<Unit> {
         if (!ensureConnected()) {
             return Result.failure(IllegalStateException("Could not connect to SSO Service."))
         }
@@ -252,8 +464,8 @@ class SsoApiClient(private val context: Context) {
             }
             
             try {
-                service.switchAccount(account)
-                Log.d(TAG, "Switch account call completed for account: ${account.name}")
+                service.switchAccount(guid)
+                Log.d(TAG, "Switch account call completed for guid: $guid")
                 Result.success(Unit)
             } catch (e: RemoteException) {
                 Log.e(TAG, "Switch account failed with RemoteException", e)
@@ -267,11 +479,10 @@ class SsoApiClient(private val context: Context) {
     
     /**
      * Get the currently active account.
-     * Connects on-demand if not already connected.
      * @return The active account, or null if no account is active or service unavailable
      */
     suspend fun getActiveAccount(): Account? {
-        // Connect on-demand
+        Log.d(TAG, "getActiveAccount() called - attempting to connect")
         if (!ensureConnected()) {
             Log.w(TAG, "Could not connect to get active account")
             return null
@@ -279,9 +490,10 @@ class SsoApiClient(private val context: Context) {
         
         return withContext(Dispatchers.IO) {
             try {
+                Log.d(TAG, "getActiveAccount() - calling service.activeAccount")
                 val account = ssoService?.activeAccount
                 if (account != null) {
-                    Log.d(TAG, "Active account: email='${account.email}', name='${account.name}'")
+                    Log.d(TAG, "Active account: guid='${account.guid}', mail='${account.mail}'")
                 } else {
                     Log.d(TAG, "No active account")
                 }
@@ -298,11 +510,10 @@ class SsoApiClient(private val context: Context) {
     
     /**
      * Get all logged-in accounts.
-     * Connects on-demand if not already connected.
      * @return List of all accounts, or empty list if none or service unavailable
      */
     suspend fun getAllAccounts(): List<Account> {
-        // Connect on-demand
+        Log.d(TAG, "getAllAccounts() called - attempting to connect")
         if (!ensureConnected()) {
             Log.w(TAG, "Could not connect to get all accounts")
             return emptyList()
@@ -310,13 +521,18 @@ class SsoApiClient(private val context: Context) {
         
         return withContext(Dispatchers.IO) {
             try {
+                Log.d(TAG, "getAllAccounts() - calling service.allAccounts")
                 val rawAccounts = ssoService?.allAccounts
-                // Filter out any null accounts from the list
+                Log.d(TAG, "getAllAccounts() - rawAccounts received: type=${rawAccounts?.javaClass?.name}, size=${rawAccounts?.size}")
+                if (rawAccounts != null) {
+                    rawAccounts.forEachIndexed { index, account ->
+                        Log.d(TAG, "  Raw Account[$index]: ${if (account == null) "NULL" else "guid=${account.guid}, mail=${account.mail}"}")
+                    }
+                }
                 val accounts = rawAccounts?.filterNotNull() ?: emptyList()
-                Log.d(TAG, "Got ${accounts.size} accounts from service")
-                // Log each account for debugging
+                Log.d(TAG, "Got ${accounts.size} accounts from service (after filterNotNull)")
                 accounts.forEachIndexed { index, account ->
-                    Log.d(TAG, "Account[$index]: email='${account.email}', name='${account.name}', isActive=${account.isActive}")
+                    Log.d(TAG, "  Account[$index]: guid='${account.guid}', mail='${account.mail}', isActive=${account.isActive}")
                 }
                 accounts
             } catch (e: RemoteException) {

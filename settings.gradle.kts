@@ -22,4 +22,3 @@ dependencyResolutionManagement {
 rootProject.name = "account"
 include(":app")
 include(":ssoapi")
-include(":accountsdk")
