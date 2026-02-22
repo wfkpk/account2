@@ -36,10 +36,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import coil.compose.SubcomposeAsyncImage
 import com.example.account.viewmodel.AccountViewModel
 import com.example.account.viewmodel.LoginState
 import com.example.ssoapi.Account
@@ -110,20 +112,14 @@ fun AccountScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             // Avatar
-                            Box(
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.primary),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = (active.mail.firstOrNull() ?: '?').uppercase(),
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = MaterialTheme.colorScheme.onPrimary,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
+                            AccountAvatar(
+                                imageUrl = active.profileImage,
+                                initial = (active.mail.firstOrNull() ?: '?').uppercaseChar(),
+                                size = 48,
+                                backgroundColor = MaterialTheme.colorScheme.primary,
+                                textColor = MaterialTheme.colorScheme.onPrimary,
+                                textStyle = MaterialTheme.typography.titleMedium
+                            )
                             Spacer(modifier = Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
@@ -277,19 +273,14 @@ fun AccountSwitchItem(
                 .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.secondary),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = (account.mail.firstOrNull() ?: '?').uppercase(),
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSecondary
-                )
-            }
+            AccountAvatar(
+                imageUrl = account.profileImage,
+                initial = (account.mail.firstOrNull() ?: '?').uppercaseChar(),
+                size = 40,
+                backgroundColor = MaterialTheme.colorScheme.secondary,
+                textColor = MaterialTheme.colorScheme.onSecondary,
+                textStyle = MaterialTheme.typography.titleSmall
+            )
 
             Column(
                 modifier = Modifier
@@ -317,6 +308,78 @@ fun AccountSwitchItem(
             ) {
                 Text("Switch")
             }
+        }
+    }
+}
+
+/**
+ * A circular avatar that loads a remote profile image when available,
+ * and falls back to a coloured circle with the user's initial otherwise.
+ */
+@Composable
+fun AccountAvatar(
+    imageUrl: String?,
+    initial: Char,
+    size: Int,
+    backgroundColor: androidx.compose.ui.graphics.Color,
+    textColor: androidx.compose.ui.graphics.Color,
+    textStyle: androidx.compose.ui.text.TextStyle
+) {
+    if (!imageUrl.isNullOrBlank()) {
+        SubcomposeAsyncImage(
+            model = imageUrl,
+            contentDescription = "Profile image",
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .size(size.dp)
+                .clip(CircleShape),
+            loading = {
+                Box(
+                    modifier = Modifier
+                        .size(size.dp)
+                        .clip(CircleShape)
+                        .background(backgroundColor),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size((size / 2).dp),
+                        strokeWidth = 2.dp,
+                        color = textColor
+                    )
+                }
+            },
+            error = {
+                // If the image fails to load, fall back to initials
+                Box(
+                    modifier = Modifier
+                        .size(size.dp)
+                        .clip(CircleShape)
+                        .background(backgroundColor),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = initial.toString(),
+                        style = textStyle,
+                        color = textColor,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        )
+    } else {
+        Box(
+            modifier = Modifier
+                .size(size.dp)
+                .clip(CircleShape)
+                .background(backgroundColor),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = initial.toString(),
+                style = textStyle,
+                color = textColor,
+                fontWeight = FontWeight.Bold
+            )
         }
     }
 }

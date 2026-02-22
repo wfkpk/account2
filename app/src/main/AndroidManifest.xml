@@ -2,6 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Required to load profile images over the network (Coil / OkHttp) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!--
         Required for Android 11+ (API 30+) package visibility.
         Without this, bindService() to com.example.service returns false silently —
