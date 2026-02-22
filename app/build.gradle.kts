@@ -30,13 +30,21 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+    // AAR lives in app/libs/ — no Maven needed
+    sourceSets {
+        getByName("main") {
+            jniLibs.srcDirs("libs")
+        }
+    }
+
     buildFeatures {
         compose = true
     }
 }
 
 dependencies {
-    implementation(project(":ssoapi"))
+    // ssoapi-debug.aar bundled directly from sso-api-lib
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)

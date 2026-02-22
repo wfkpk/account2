@@ -2,6 +2,18 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!--
+        Required for Android 11+ (API 30+) package visibility.
+        Without this, bindService() to com.example.service returns false silently —
+        the OS hides foreign packages from other apps by default since API 30.
+    -->
+    <queries>
+        <package android:name="com.example.service" />
+        <intent>
+            <action android:name="com.example.service.SSO_SERVICE" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"

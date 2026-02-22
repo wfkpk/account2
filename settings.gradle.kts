@@ -14,6 +14,7 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
+        mavenLocal()   // for com.example:ssoapi published from sso-api-lib
         google()
         mavenCentral()
     }
@@ -21,4 +22,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "account"
 include(":app")
-include(":ssoapi")
+// ssoapi is now a standalone library — import via implementation("com.example:ssoapi:1.0.0")
