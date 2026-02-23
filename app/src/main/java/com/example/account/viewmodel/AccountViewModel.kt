@@ -58,16 +58,23 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun login(mail: String, password: String) {
-        viewModelScope.launch {
-            _loginState.value = LoginState.Loading
-            _errorMessage.value = null
+        _loginState.value = LoginState.Loading
+        _errorMessage.value = null
 
-            val result = ssoApiClient.login(mail, password)
+        //
+        // ssoApiClient.login() returns SaResultData immediately AND fires
+        // the onResult lambda asynchronously when the service responds.
+        //
+        // SaResultData tells us what happened synchronously:
+        //   .success = true  → request accepted; stay Loading, wait for async callback
+        //   .fail    = true  → rejected right now (not connected, bad params, etc.)
+        //
+        val immediate = ssoApiClient.login(mail, password) { result ->
+            // ─── This lambda runs on Main Thread, asynchronously ───────────────────
+            // Fired by: Binder thread → mainHandler.post{} → here
             result.fold(
                 onSuccess = { account ->
                     Log.d(TAG, "Login successful for: ${account.mail}")
-                    // Use the returned account directly to update state,
-                    // since the service may not have persisted it yet when we query
                     val activeAccount = account.copy(isActive = true)
                     _activeAccount.value = activeAccount
                     val currentAccounts = _accounts.value.toMutableList()
@@ -83,7 +90,18 @@ class AccountViewModel(application: Application) : AndroidViewModel(application)
                 }
             )
         }
+
+        // ─── Handle SaResultData immediately (synchronous verdict) ────────────────
+        Log.d(TAG, "login() SaResultData → success=${immediate.success}, fail=${immediate.fail}, msg=${immediate.message}")
+        if (immediate.fail) {
+            // Service or lib rejected before even reaching the network.
+            // The onResult lambda above was also called for this case inside login(),
+            // so state is already set — just log for clarity.
+            Log.w(TAG, "login() rejected immediately: ${immediate.message}")
+        }
+        // If immediate.success → spinner stays, async lambda will update state
     }
+
 
     fun register(mail: String, password: String) {
         viewModelScope.launch {
